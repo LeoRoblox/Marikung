@@ -78,8 +78,36 @@ const uid=()=>crypto.randomUUID ? crypto.randomUUID() : String(Date.now())+Math.
 const now=()=>new Date().toISOString();
 const clone=o=>JSON.parse(JSON.stringify(o));
 function hash(s){return crypto.subtle.digest('SHA-256',new TextEncoder().encode(s)).then(b=>[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join(''));}
+const FIREBASE_DB_URL='https://marikung-b925d-default-rtdb.europe-west1.firebasedatabase.app';
+const FIREBASE_STATE_PATH='/workspace/state.json';
 function load(){try{return JSON.parse(localStorage.getItem('ar_workspace_state'))||null}catch(e){return null}}
-function save(){localStorage.setItem('ar_workspace_state',JSON.stringify(state))}
+function localSnapshot(){const copy=clone(state); delete copy.current; return copy}
+async function pullRemoteState(){
+  try{
+    const r=await fetch(FIREBASE_DB_URL+FIREBASE_STATE_PATH,{cache:'no-store'});
+    if(!r.ok) throw new Error('Firebase HTTP '+r.status);
+    const remote=await r.json();
+    if(remote && typeof remote==='object'){
+      const current=state?.current||null;
+      state={...state,...remote,current};
+      localStorage.setItem('ar_workspace_state',JSON.stringify(state));
+      return true;
+    }
+  }catch(e){ console.warn('Firebase read failed:',e); }
+  return false;
+}
+async function pushRemoteState(){
+  try{
+    const r=await fetch(FIREBASE_DB_URL+FIREBASE_STATE_PATH,{
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(localSnapshot())
+    });
+    if(!r.ok) throw new Error('Firebase HTTP '+r.status);
+    return true;
+  }catch(e){ console.warn('Firebase write failed:',e); toast('Firebase konnte nicht gespeichert werden. Prüfe die Realtime-Database-Regeln.','danger'); return false; }
+}
+function save(){localStorage.setItem('ar_workspace_state',JSON.stringify(state)); pushRemoteState()}
 let state=load() || {users:[],codes:[],tasks:[],schedule:{},folders:[],reports:[],absences:[],current:null};
 // Migrate away the previous IP-based owner bootstrap. The owner is now created only through the special entry code.
 if (Array.isArray(state.users)) {
@@ -127,6 +155,7 @@ function renderAuthScreen(mode=window.authMode||'register'){
  }
  document.getElementById('authForm').onsubmit=async e=>{
    e.preventDefault();
+   await pullRemoteState();
    let username=document.getElementById('authUser').value.trim();
    if(!reg){
      let u=state.users.find(x=>x.username.toLowerCase()===username.toLowerCase());
@@ -153,7 +182,7 @@ function renderAuthScreen(mode=window.authMode||'register'){
      let u={id:uid(),username:OWNER,password:'',passwordPlain:'',role:'Owner',profile:'',idNo:'AR-'+Math.floor(100000+Math.random()*900000),suspended:false,warnings:[],devices:[getDeviceId()],createdAt:now()};
      state.users.push(u);
      state.codes.push({id:uid(),code:OWNER_ENTRY_CODE,username:OWNER,used:true,usedBy:u.id,usedAt:now(),special:true});
-     state.current=u.id;save();renderApp();toast('Account wurde erstellt.','success');return;
+     state.current=u.id;save();await pushRemoteState();renderApp();toast('Account wurde erstellt.','success');return;
    }
    let c=state.codes.find(x=>x.code===code&&!x.used);
    if(!c)return toast('Dieser Beitritts-Code ist ungültig oder bereits benutzt.','danger');
@@ -166,7 +195,7 @@ function renderAuthScreen(mode=window.authMode||'register'){
 }
 function getDeviceId(){let x=localStorage.getItem('ar_device_id');if(!x){x=uid();localStorage.setItem('ar_device_id',x)}return x}
 function openRegisterPassword(username,code){openModal(`<div class="modal center"><div class="modal-head"><h2>Passwort festlegen</h2><button class="close" data-close>${icon('x',17)}</button></div><div class="stack"><div class="field"><label>Benutzername</label><input class="input" value="${esc(username)}" disabled></div><div class="field"><label>Passwort</label><input id="newPass" class="input" type="password" minlength="6" placeholder="mindestens 6 Zeichen"></div><button id="createAccount" class="primary btn-wide">${icon('user-plus',17)} Account erstellen</button></div></div>`,'center');
- document.getElementById('createAccount').onclick=async()=>{let p=document.getElementById('newPass').value;if(p.length<6)return toast('Passwort muss mindestens 6 Zeichen haben.','danger');let c=state.codes.find(x=>x.code===code&&!x.used);if(!c)return toast('Code wurde bereits verwendet.','danger');let u={id:uid(),username,password:await hash(p),passwordPlain:p,role:'User',profile:'',idNo:'AR-'+Math.floor(100000+Math.random()*900000),suspended:false,warnings:[],devices:[getDeviceId()],createdAt:now()};state.users.push(u);c.used=true;c.usedBy=u.id;c.usedAt=now();state.current=u.id;save();closeModal();renderApp();toast('Account wurde erstellt.','success')};refreshIcons()}
+ document.getElementById('createAccount').onclick=async()=>{await pullRemoteState();let p=document.getElementById('newPass').value;if(p.length<6)return toast('Passwort muss mindestens 6 Zeichen haben.','danger');let c=state.codes.find(x=>x.code===code&&!x.used);if(!c)return toast('Code wurde bereits verwendet.','danger');let u={id:uid(),username,password:await hash(p),passwordPlain:p,role:'User',profile:'',idNo:'AR-'+Math.floor(100000+Math.random()*900000),suspended:false,warnings:[],devices:[getDeviceId()],createdAt:now()};state.users.push(u);c.used=true;c.usedBy=u.id;c.usedAt=now();state.current=u.id;save();await pushRemoteState();closeModal();renderApp();toast('Account wurde erstellt.','success')};refreshIcons()}
 function renderApp(){document.getElementById('app').innerHTML=`<div class="shell"><aside class="sidebar"><div class="brand"><div class="brand-mark">${icon('command',18)}</div><strong>AR Workspace</strong></div><nav class="nav">${navItems().map(([v,i,l])=>`<button class="${view===v?'active':''}" data-nav="${v}">${icon(i,18)}<span>${l}</span></button>`).join('')}</nav><div class="sidebar-spacer"></div><div class="mini-user"><div class="row">${avatar(me())}<div style="min-width:0"><div style="font-size:12px;font-weight:650;overflow:hidden;text-overflow:ellipsis">${esc(me().username)}</div><small>${esc(me().role)}</small></div></div></div><button class="side-action" id="logout" style="margin-top:6px">${icon('log-out',17)} <span>Ausloggen</span></button></aside><main class="main"><div class="topbar"><div class="breadcrumbs"><span>Workspace</span>${subview?`<span>›</span><strong>${esc(pageTitle())}</strong>`:''}</div><div class="top-switch ${view==='dashboard'||view==='tasks'?'':'right'}"><div class="dot"></div></div><div class="top-actions"><button class="ghost" id="openSettings">${icon('settings-2',16)} Einstellungen</button><button class="ghost" id="openCard">${icon('badge-check',16)} Ausweis</button></div></div><div class="content" id="content"></div></main></div><div class="mobile-nav">${navItems().map(([v,i,l])=>`<button class="${view===v?'active':''}" data-nav="${v}">${icon(i,16)}<span>${l}</span></button>`).join('')}</div>`;
  document.querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=>{view=b.dataset.nav;subview='';renderApp()});document.getElementById('openSettings').onclick=()=>openSettings();document.getElementById('openCard').onclick=()=>openIdCard();document.getElementById('logout').onclick=logout;renderView();refreshIcons();}
 function pageTitle(){return ({dashboard:'Dashboard',tasks:'Aufgaben',reports:'Berichte',more:'Mehr'}[view]||'')}
@@ -215,8 +244,9 @@ function logout(){state.current=null;save();renderAuthScreen('login')}
 function bindView(){if(view==='dashboard'){document.getElementById('scheduleBtn')?.addEventListener('click',openSchedule);document.getElementById('scheduleBtn2')?.addEventListener('click',openSchedule);document.getElementById('absenceBtn')?.addEventListener('click',openAbsence);document.getElementById('absenceTopBtn')?.addEventListener('click',openAbsence);document.getElementById('foldersBtn')?.addEventListener('click',openFolders);document.querySelectorAll('[data-delete-absence]').forEach(b=>b.onclick=e=>{e.stopPropagation();state.absences=state.absences.filter(x=>x.id!==b.dataset.deleteAbsence);save();renderView();toast('Abwesenheit gelöscht.','success')});document.querySelectorAll('[data-all-warns]').forEach(b=>b.onclick=e=>openAllWarns(b.dataset.allWarns))}if(view==='tasks'){document.getElementById('addTask')?.addEventListener('click',()=>openTaskCreator());document.querySelectorAll('[data-task]').forEach(x=>x.onclick=()=>openTaskDetail(x.dataset.task));document.querySelectorAll('[data-edit-task]').forEach(b=>b.onclick=e=>{e.stopPropagation();openTaskCreator(b.dataset.editTask)});document.querySelectorAll('[data-delete-task]').forEach(b=>b.onclick=e=>{e.stopPropagation();state.tasks=state.tasks.filter(x=>x.id!==b.dataset.deleteTask);save();renderView();toast('Aufgabe gelöscht.','success')})}if(view==='reports'){document.getElementById('addReport')?.addEventListener('click',openReportCreator);document.querySelectorAll('[data-report]').forEach(x=>x.onclick=e=>{if(!e.target.closest('[data-delete-report]'))openReport(x.dataset.report)});document.querySelectorAll('[data-delete-report]').forEach(b=>b.onclick=e=>{e.stopPropagation();state.reports=state.reports.filter(x=>x.id!==b.dataset.deleteReport);save();renderView();toast('Bericht gelöscht.','success')})}if(view==='more'){document.querySelectorAll('[data-admin-tab]').forEach(b=>b.onclick=()=>{adminTab=b.dataset.adminTab;renderView()});document.getElementById('adminRoleAdd')?.addEventListener('click',()=>{adminTab='status';document.querySelector('[data-admin-tab="status"]')?.click()});document.querySelectorAll('.role-save').forEach(b=>b.onclick=()=>{let u=state.users.find(x=>x.id===b.dataset.user);let role=document.querySelector(`.role-select[data-user="${b.dataset.user}"]`).value;if(u.username===OWNER&&role!=='Owner')return toast('Owner-Rolle kann nicht entfernt werden.','danger');u.role=role;save();renderView();toast('Rolle gespeichert.','success')});document.getElementById('newCode')?.addEventListener('click',openCodeCreator);document.querySelectorAll('[data-delete-code]').forEach(b=>b.onclick=()=>{state.codes=state.codes.filter(x=>x.id!==b.dataset.deleteCode);save();renderView();toast('Code gelöscht.','success')});document.querySelectorAll('[data-warn]').forEach(b=>b.onclick=()=>openWarn(b.dataset.warn));document.querySelectorAll('[data-delete-warn-open]').forEach(b=>b.onclick=()=>openWarnDelete(b.dataset.deleteWarnOpen));document.querySelectorAll('[data-suspend]').forEach(b=>b.onclick=()=>{let u=state.users.find(x=>x.id===b.dataset.suspend);if(u.username===OWNER)return toast('Owner kann nicht gesperrt werden.','danger');u.suspended=!u.suspended;if(u.suspended&&u.id===state.current)state.current=null;save();renderView();toast(u.suspended?'Benutzer gesperrt.':'Benutzer entsperrt.','success')});document.querySelectorAll('[data-delete-user]').forEach(b=>b.onclick=()=>{let u=state.users.find(x=>x.id===b.dataset.deleteUser);if(!u||u.username===OWNER)return toast('Owner kann nicht gelöscht werden.','danger');state.users=state.users.filter(x=>x.id!==u.id);save();renderView();toast('Benutzer gelöscht.','success')})}}
 
 // Start the app after the DOM is ready.
-document.addEventListener('DOMContentLoaded',()=>{
+document.addEventListener('DOMContentLoaded',async()=>{
   try {
+    await pullRemoteState();
     renderAuth();
   } catch (err) {
     console.error('AR Workspace startup error:', err);
