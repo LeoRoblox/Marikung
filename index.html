@@ -80,34 +80,46 @@ const clone=o=>JSON.parse(JSON.stringify(o));
 function hash(s){return crypto.subtle.digest('SHA-256',new TextEncoder().encode(s)).then(b=>[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join(''));}
 const FIREBASE_DB_URL='https://marikung-b925d-default-rtdb.europe-west1.firebasedatabase.app';
 const FIREBASE_STATE_PATH='/workspace/state.json';
+const FIREBASE_REST = FIREBASE_DB_URL;
+async function firebaseGet(path){
+  const r=await fetch(FIREBASE_REST+path+'.json',{cache:'no-store'});
+  if(!r.ok) throw new Error('Firebase HTTP '+r.status);
+  return await r.json();
+}
+async function firebasePut(path,data){
+  const r=await fetch(FIREBASE_REST+path+'.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  if(!r.ok) throw new Error('Firebase HTTP '+r.status);
+  return await r.json();
+}
+async function firebasePatch(path,data){
+  const r=await fetch(FIREBASE_REST+path+'.json',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  if(!r.ok) throw new Error('Firebase HTTP '+r.status);
+  return await r.json();
+}
 function load(){try{return JSON.parse(localStorage.getItem('ar_workspace_state'))||null}catch(e){return null}}
 function localSnapshot(){const copy=clone(state); delete copy.current; return copy}
 async function pullRemoteState(){
   try{
-    const r=await fetch(FIREBASE_DB_URL+FIREBASE_STATE_PATH,{cache:'no-store'});
-    if(!r.ok) throw new Error('Firebase HTTP '+r.status);
-    const remote=await r.json();
+    const remote=await firebaseGet(FIREBASE_STATE_PATH);
     if(remote && typeof remote==='object'){
       const current=state?.current||null;
       state={...state,...remote,current};
       localStorage.setItem('ar_workspace_state',JSON.stringify(state));
       return true;
     }
-  }catch(e){ console.warn('Firebase read failed:',e); }
+  }catch(e){ console.warn('Firebase read failed:', e); }
   return false;
 }
 async function pushRemoteState(){
   try{
-    const r=await fetch(FIREBASE_DB_URL+FIREBASE_STATE_PATH,{
-      method:'PUT',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(localSnapshot())
-    });
-    if(!r.ok) throw new Error('Firebase HTTP '+r.status);
+    await firebasePut(FIREBASE_STATE_PATH,localSnapshot());
     return true;
-  }catch(e){ console.warn('Firebase write failed:',e); toast('Firebase konnte nicht gespeichert werden. Prüfe die Realtime-Database-Regeln.','danger'); return false; }
+  }catch(e){ console.warn('Firebase write failed:',e); return false; }
 }
-function save(){localStorage.setItem('ar_workspace_state',JSON.stringify(state)); pushRemoteState()}
+async function refreshRemoteBeforeAuth(){
+  await pullRemoteState();
+}
+function save(){localStorage.setItem('ar_workspace_state',JSON.stringify(state)); pushRemoteState().catch(()=>{});}
 let state=load() || {users:[],codes:[],tasks:[],schedule:{},folders:[],reports:[],absences:[],current:null};
 // Migrate away the previous IP-based owner bootstrap. The owner is now created only through the special entry code.
 if (Array.isArray(state.users)) {
@@ -173,6 +185,8 @@ function renderAuthScreen(mode=window.authMode||'register'){
      state.current=u.id;save();renderApp();return;
    }
    let code=document.getElementById('authCode').value.trim();
+   // Always refresh the shared database before checking a code so registrations work on every device.
+   await refreshRemoteBeforeAuth();
    // Special one-time owner entry. It is consumed after the owner account is created.
    if(username.toLowerCase()===OWNER.toLowerCase() && code===OWNER_ENTRY_CODE){
      let used=state.codes.some(x=>x.code===OWNER_ENTRY_CODE && x.used);
@@ -185,6 +199,18 @@ function renderAuthScreen(mode=window.authMode||'register'){
      state.current=u.id;save();await pushRemoteState();renderApp();toast('Account wurde erstellt.','success');return;
    }
    let c=state.codes.find(x=>x.code===code&&!x.used);
+   if(!c){
+     try{
+       const remote=await firebaseGet(FIREBASE_STATE_PATH);
+       if(remote&&typeof remote==='object'){
+         const current=state.current||null;
+         state={...state,...remote,current};
+         c=state.codes.find(x=>x.code===code&&!x.used);
+       }
+     }catch(e){
+       return toast('Firebase ist nicht erreichbar. Prüfe die Realtime-Database-Regeln.','danger');
+     }
+   }
    if(!c)return toast('Dieser Beitritts-Code ist ungültig oder bereits benutzt.','danger');
    if(c.username && c.username.toLowerCase()!==username.toLowerCase())return toast('Dieser Code ist für einen anderen Benutzernamen vorgesehen.','danger');
    if(username.toLowerCase()===OWNER.toLowerCase())return toast('Benutzername ist bereits vergeben.','danger');
@@ -195,7 +221,7 @@ function renderAuthScreen(mode=window.authMode||'register'){
 }
 function getDeviceId(){let x=localStorage.getItem('ar_device_id');if(!x){x=uid();localStorage.setItem('ar_device_id',x)}return x}
 function openRegisterPassword(username,code){openModal(`<div class="modal center"><div class="modal-head"><h2>Passwort festlegen</h2><button class="close" data-close>${icon('x',17)}</button></div><div class="stack"><div class="field"><label>Benutzername</label><input class="input" value="${esc(username)}" disabled></div><div class="field"><label>Passwort</label><input id="newPass" class="input" type="password" minlength="6" placeholder="mindestens 6 Zeichen"></div><button id="createAccount" class="primary btn-wide">${icon('user-plus',17)} Account erstellen</button></div></div>`,'center');
- document.getElementById('createAccount').onclick=async()=>{await pullRemoteState();let p=document.getElementById('newPass').value;if(p.length<6)return toast('Passwort muss mindestens 6 Zeichen haben.','danger');let c=state.codes.find(x=>x.code===code&&!x.used);if(!c)return toast('Code wurde bereits verwendet.','danger');let u={id:uid(),username,password:await hash(p),passwordPlain:p,role:'User',profile:'',idNo:'AR-'+Math.floor(100000+Math.random()*900000),suspended:false,warnings:[],devices:[getDeviceId()],createdAt:now()};state.users.push(u);c.used=true;c.usedBy=u.id;c.usedAt=now();state.current=u.id;save();await pushRemoteState();closeModal();renderApp();toast('Account wurde erstellt.','success')};refreshIcons()}
+ document.getElementById('createAccount').onclick=async()=>{await pullRemoteState();let p=document.getElementById('newPass').value;if(p.length<6)return toast('Passwort muss mindestens 6 Zeichen haben.','danger');let c=state.codes.find(x=>x.code===code&&!x.used);if(!c)return toast('Code wurde bereits verwendet.','danger');let u={id:uid(),username,password:await hash(p),passwordPlain:p,role:'User',profile:'',idNo:'AR-'+Math.floor(100000+Math.random()*900000),suspended:false,warnings:[],devices:[getDeviceId()],createdAt:now()};state.users.push(u);c.used=true;c.usedBy=u.id;c.usedAt=now();state.current=u.id;localStorage.setItem('ar_workspace_state',JSON.stringify(state));const ok=await pushRemoteState();if(!ok){state.users=state.users.filter(x=>x.id!==u.id);c.used=false;delete c.usedBy;delete c.usedAt;state.current=null;localStorage.setItem('ar_workspace_state',JSON.stringify(state));return toast('Registrierung konnte nicht gespeichert werden. Prüfe die Firebase-Realtime-Database-Regeln.','danger')}closeModal();renderApp();toast('Account wurde erstellt.','success')};refreshIcons()}
 function renderApp(){document.getElementById('app').innerHTML=`<div class="shell"><aside class="sidebar"><div class="brand"><div class="brand-mark">${icon('command',18)}</div><strong>AR Workspace</strong></div><nav class="nav">${navItems().map(([v,i,l])=>`<button class="${view===v?'active':''}" data-nav="${v}">${icon(i,18)}<span>${l}</span></button>`).join('')}</nav><div class="sidebar-spacer"></div><div class="mini-user"><div class="row">${avatar(me())}<div style="min-width:0"><div style="font-size:12px;font-weight:650;overflow:hidden;text-overflow:ellipsis">${esc(me().username)}</div><small>${esc(me().role)}</small></div></div></div><button class="side-action" id="logout" style="margin-top:6px">${icon('log-out',17)} <span>Ausloggen</span></button></aside><main class="main"><div class="topbar"><div class="breadcrumbs"><span>Workspace</span>${subview?`<span>›</span><strong>${esc(pageTitle())}</strong>`:''}</div><div class="top-switch ${view==='dashboard'||view==='tasks'?'':'right'}"><div class="dot"></div></div><div class="top-actions"><button class="ghost" id="openSettings">${icon('settings-2',16)} Einstellungen</button><button class="ghost" id="openCard">${icon('badge-check',16)} Ausweis</button></div></div><div class="content" id="content"></div></main></div><div class="mobile-nav">${navItems().map(([v,i,l])=>`<button class="${view===v?'active':''}" data-nav="${v}">${icon(i,16)}<span>${l}</span></button>`).join('')}</div>`;
  document.querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=>{view=b.dataset.nav;subview='';renderApp()});document.getElementById('openSettings').onclick=()=>openSettings();document.getElementById('openCard').onclick=()=>openIdCard();document.getElementById('logout').onclick=logout;renderView();refreshIcons();}
 function pageTitle(){return ({dashboard:'Dashboard',tasks:'Aufgaben',reports:'Berichte',more:'Mehr'}[view]||'')}
@@ -214,7 +240,7 @@ function openReport(id){let r=state.reports.find(x=>x.id===id);openModal(`<div c
 function adminView(){if(!isElevated())return `<div class="page-head"><div><h1>Mehr</h1><p>Dein Account hat keinen Zugriff auf das Admin Panel.</p></div></div><div class="card empty">${icon('shield-x',28)}<div style="margin-top:10px">Kein Admin-Zugriff.</div></div>`;return `<div class="page-head"><div><h1>Admin Panel</h1><p>Rollen, Beitritts-Codes und Benutzer verwalten.</p></div></div><div class="tabs"><button class="tab ${adminTab==='status'?'active':''}" data-admin-tab="status">Admin Status</button><button class="tab ${adminTab==='codes'?'active':''}" data-admin-tab="codes">Beitritts Code</button><button class="tab ${adminTab==='users'?'active':''}" data-admin-tab="users">Usern</button></div><div style="margin-top:15px" id="adminBody">${adminTab==='status'?adminStatus():adminTab==='codes'?adminCodes():adminUsers()}</div>`}
 function adminStatus(){if(!canManage())return '<div class="card empty">Nur Owner und Manager können Rollen verwalten.</div>';return `<div class="page-head" style="margin-top:14px"><div><h2 style="font-size:18px;margin:0">Rollen</h2></div><button class="primary" id="adminRoleAdd">${icon('plus',16)}</button></div><div class="list">${state.users.map(u=>`<div class="item"><div class="left">${avatar(u,38)}<div><div class="title">${esc(u.username)}</div><div class="meta">Aktuell: ${esc(u.role)}</div></div></div><div class="right"><select class="input role-select" data-user="${u.id}" style="width:140px;padding:8px 10px"><option ${u.role==='User'?'selected':''}>User</option><option ${u.role==='Admin'?'selected':''}>Admin</option><option ${u.role==='Manager'?'selected':''}>Manager</option><option ${u.role==='Owner'?'selected':''}>Owner</option></select><button class="ghost role-save" data-user="${u.id}">${icon('save',14)} Speichern</button></div></div>`).join('')}</div>`}
 function adminCodes(){if(!canManage())return '<div class="card empty">Nur Manager und Owner können Beitritts-Codes erstellen.</div>';return `<div class="page-head" style="margin-top:14px"><div><h2 style="font-size:18px;margin:0">Beitritts-Code</h2><p>Maximal 5 Ziffern. Nach der Registrierung ist ein Code automatisch ungültig.</p></div><button class="primary" id="newCode">${icon('plus',16)}</button></div><div class="list">${state.codes.map(c=>`<div class="item"><div class="left">${icon('key-round',20)}<div><div class="title" style="letter-spacing:2px">${esc(c.code)}</div><div class="meta">Benutzername: ${esc(c.username||'frei')} • Status: <span class="red">${c.used?'Benutzt.':'Nicht benutzt.'}</span></div></div></div><div class="right"><button class="icon-btn" data-delete-code="${c.id}">${icon('trash-2',15)}</button></div></div>`).join('')||'<div class="empty">Noch keine Codes.</div>'}</div>`}
-function openCodeCreator(){openModal(`<div class="modal center"><div class="modal-head"><h2>Code erstellen</h2><button class="close" data-close>${icon('x',17)}</button></div><div class="stack"><div class="field"><label>Benutzernamen</label><input id="codeUser" class="input" placeholder="Benutzername"></div><div class="field"><label>Code</label><input id="codeValue" class="input" inputmode="numeric" maxlength="5" placeholder="max. 5 Ziffern"></div><button id="saveCode" class="primary btn-wide">${icon('key-round',16)} Code einrichten</button></div></div>`);document.getElementById('saveCode').onclick=()=>{let username=document.getElementById('codeUser').value.trim(),code=document.getElementById('codeValue').value.trim();if(!username||!/^[0-9]{1,5}$/.test(code))return toast('Benutzernamen und einen Code mit 1–5 Ziffern eingeben.','danger');if(state.users.some(u=>u.username.toLowerCase()===username.toLowerCase()))return toast('Benutzername ist bereits vergeben.','danger');if(state.codes.some(c=>c.code===code&&!c.used))return toast('Dieser Code ist bereits aktiv.','danger');state.codes.unshift({id:uid(),code,username,used:false,createdAt:now()});save();closeModal();renderView();toast('Code wurde eingerichtet.','success')};refreshIcons()}
+function openCodeCreator(){openModal(`<div class="modal center"><div class="modal-head"><h2>Code erstellen</h2><button class="close" data-close>${icon('x',17)}</button></div><div class="stack"><div class="field"><label>Benutzernamen</label><input id="codeUser" class="input" placeholder="Benutzername"></div><div class="field"><label>Code</label><input id="codeValue" class="input" inputmode="numeric" maxlength="5" placeholder="max. 5 Ziffern"></div><button id="saveCode" class="primary btn-wide">${icon('key-round',16)} Code einrichten</button></div></div>`);document.getElementById('saveCode').onclick=async()=>{let username=document.getElementById('codeUser').value.trim(),code=document.getElementById('codeValue').value.trim();if(!username||!/^[0-9]{1,5}$/.test(code))return toast('Benutzernamen und einen Code mit 1–5 Ziffern eingeben.','danger');await pullRemoteState();if(state.users.some(u=>u.username.toLowerCase()===username.toLowerCase()))return toast('Benutzername ist bereits vergeben.','danger');if(state.codes.some(c=>c.code===code&&!c.used))return toast('Dieser Code ist bereits aktiv.','danger');state.codes.unshift({id:uid(),code,username,used:false,createdAt:now()});localStorage.setItem('ar_workspace_state',JSON.stringify(state));const ok=await pushRemoteState();if(!ok)return toast('Code konnte nicht zu Firebase gespeichert werden. Prüfe die Realtime-Database-Regeln.','danger');closeModal();renderView();toast('Code wurde eingerichtet.','success')};refreshIcons()}
 
 function adminUsers(){return `<div class="page-head" style="margin-top:14px"><div><h2 style="font-size:18px;margin:0">Benutzer</h2></div></div><div class="list">${state.users.map(u=>`<div class="card"><div class="item" style="border:0;padding:0;background:transparent"><div class="left">${avatar(u,44)}<div><div class="title">${esc(u.username)}</div><div class="meta">Passwort • Rolle: ${esc(u.role)}${u.suspended?' • GESPERRT':''}</div></div></div><span class="pill">${u.warnings?.length||0} Warnungen</span></div><div class="form-actions">${canManage()?`<button class="ghost" data-suspend="${u.id}">${icon('ban',15)} ${u.suspended?'Entsperren':'Benutzer sperren'}</button><button class="danger" data-delete-user="${u.id}">${icon('user-x',15)} Benutzer löschen</button>`:''}<button class="ghost" data-warn="${u.id}">${icon('triangle-alert',15)} Warn hinzufügen</button>${canDeleteWarn()&&u.warnings?.length?`<button class="ghost" data-delete-warn-open="${u.id}">${icon('trash-2',15)} Warn löschen</button>`:''}</div></div>`).join('')}</div>`}
 function openWarnDelete(userId){let u=state.users.find(x=>x.id===userId);if(!u||!u.warnings?.length)return toast('Keine Warnungen vorhanden.','danger');let selected=u.warnings[0];openModal(`<div class="modal center"><div class="modal-head"><h2>Warn löschen</h2><button class="close" data-close>${icon('x',17)}</button></div><div class="stack"><div class="field"><label>Warn auswählen</label><select id="warnDeleteSelect" class="input">${u.warnings.map((w,i)=>`<option value="${w.id}">${i+1}. ${esc(w.title)}</option>`).join('')}</select></div><div id="warnDeletePreview">${warnPreview(selected)}</div><button id="deleteWarn" class="danger btn-wide">${icon('trash-2',16)} Warn löschen</button></div></div>`);const select=document.getElementById('warnDeleteSelect');const preview=document.getElementById('warnDeletePreview');select.onchange=()=>{selected=u.warnings.find(w=>w.id===select.value)||u.warnings[0];preview.innerHTML=warnPreview(selected);refreshIcons()};document.getElementById('deleteWarn').onclick=()=>{let id=select.value;u.warnings=(u.warnings||[]).filter(w=>w.id!==id);save();closeModal();renderView();toast('Warn gelöscht.','success')};refreshIcons()}
