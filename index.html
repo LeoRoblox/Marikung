@@ -49,6 +49,26 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 <div id="app"></div>
 <div id="modalRoot"></div>
 <div id="toastRoot"></div>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.0.0/firebase-app.js";
+  import { getDatabase } from "https://www.gstatic.com/firebasejs/12.0.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyB-9T_Yb1LPwQ3EoDe88XX_2Szklg3LATQ",
+    authDomain: "marikung-b925d.firebaseapp.com",
+    databaseURL: "https://marikung-b925d-default-rtdb.europe-west1.firebasedatabase.app",
+    projectId: "marikung-b925d",
+    storageBucket: "marikung-b925d.firebasestorage.app",
+    messagingSenderId: "980020784732",
+    appId: "1:980020784732:web:9713a66eea231cde8b0099",
+    measurementId: "G-PDDKBTJKZX"
+  };
+
+  const firebaseApp = initializeApp(firebaseConfig);
+  const firebaseDB = getDatabase(firebaseApp);
+  window.firebaseApp = firebaseApp;
+  window.firebaseDB = firebaseDB;
+</script>
 <script>
 const OWNER='l3o.yt2';
 const OWNER_ENTRY_CODE='8438843848323824834';
